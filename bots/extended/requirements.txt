@@ -1,0 +1,17 @@
+# extended_bot_v2 requirements
+
+# Extended (Starknet) SDK — REQUIRED, verified working with legacy adapter
+# Source: /tmp/ext_legacy/bot/exchange_extended.py header: x10-python-trading-starknet v1.4.1+
+x10-python-trading-starknet>=1.4.0
+
+# Data / indicators
+pandas>=2.0.0
+numpy>=1.24.0
+
+# Env loading
+python-dotenv>=1.0.0
+
+# HTTP (universe.py fetches Extended markets REST endpoint)
+requests>=2.31.0
+
+# SQLite is stdlib — no extra dep

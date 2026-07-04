@@ -1,0 +1,47 @@
+VERDICT: ARCHITECTURE. The bugs are symptoms; every confirmed latent defect is a re-instance of a class already root-fixed somewhere else in the fleet. Four structural generators:
+
+R1. FORK-PER-VENUE WITH MANUAL PATCH PROPAGATION. 4 crypto bots = one codebase forked 4x (64.7% duplicated; xnn_core byte-identical 4x), fixes hand-ported with comment tags. Proven drift: _ensure_flat root-fix (2026-05-30) reached HL abort paths only — pac:504/ext:463/nado:600 still bare market_close; _sl_confirmed_live guard on 3/4 (nado missing); insert_pending on 1/4 (HL only); place-before-cancel trail on 3/4 (pacifica missing); per-asset leverage cap on 3/4 (nado missing); trail dead-code bug ran 20 extra days on 2 venues after extended fixed it; HL imports STALE private copies of sibling adapters; IB's perm-reject fix landed at 1 of 3 sibling sites in the same file. This generates the "fixes feel like half-measures" experience directly: every fix IS a half-measure by construction — it lands on 1 of 4-5 copies.
+→ maps to: recurring-bugs class, knob-parity class, silent-failures class.
+
+R2. NON-TRANSACTIONAL ENTRY LIFECYCLE + ONE-DIRECTIONAL RECONCILIATION. fill → SL → insert_trade ordering with DB-row-driven adoption means any death in the window (crash, OOM, watchdog os._exit — which R4 makes routine) creates a live position invisible to every safety net FOREVER on pac/ext/nado. HL solved it (insert_pending pre-send + startup pending-reconcile + untracked-protect sweep); never propagated (R1).
+→ maps to: phantoms, naked-untracked positions, crash-recovery class.
+
+R3. ADAPTER ERROR-CONTRACT INVERSION. Guards assume raise-on-failure; adapters mask failure into neutral values: open_positions → {}/stale-cache (all 4 crypto — makes the phantom-guard UNKNOWN branch unreachable: a 3-tick partial outage auto-closes ALL DB rows and CANCELS live SLs), market_close → ok-shaped error dict (discarded at 3 abort sites → naked), mark_price → 0.0 (fail-open breakout guard, phantom-unfilled on pacifica), IB cancel_order → ok unconfirmed, nado per-item parse drop → per-coin phantom-close. The contract is ambient convention, not enforced interface.
+→ maps to: phantoms (the biggest single generator), silent-failures, fill-truth.
+
+R4. SINGLE-THREADED LOOP + UNBOUNDED I/O + SUICIDE-WATCHDOG AS RECOVERY. Nado: zero timeouts on every SDK call incl. order send; IB: RequestTimeout never set, watchdog alerts-only (bot hangs until manual — 3 prior incidents); HL/pacifica WS feeds: ping_interval=0, no staleness reconnect → zombie feed silently reverts scans to serial throttled REST (the exact entry-latency class bought back 07-02, undetected). The watchdog kill lands mid-entry and FEEDS R2 (creates the untracked position).
+→ maps to: falling-over, slow-execution, and (via kill-mid-entry) phantoms.
+
+ONE-TIME STRUCTURAL FIX — target architecture (fleet_core package, venue adapters, IB kept separate):
+A. Typed ExchangeClient interface, ONE implementation per venue, in one repo. Contract enforced, not documented: reads return verified data or raise ReadUnknown; close/cancel return only after position/order readback or raise. bare market_close REMOVED from the API — _ensure_flat becomes the only close primitive. Kills (impossible, not less likely): phantom mass-close-on-outage (UNKNOWN branch now reachable by construction), naked-after-abort (no unverified close exists to call), HL's stale adapter copies (single implementation), cancel-ok-unconfirmed.
+B. Entry as persisted state machine: INTENT row pre-send → PENDING → FILLED → PROTECTED → OPEN; each transition idempotent; reconciler BIDIRECTIONAL (DB→exchange phantom-guard AND exchange→DB untracked-protect sweep with foreign fences, per-tick). Kills: crash-mid-entry invisible positions, fill→journal window, stale-oid naked (SL liveness is a state invariant re-verified per tick, not an oid null-check).
+C. Transport layer with timeout-by-construction: HL's _install_session_timeout pattern generalized — every session/SDK client passes through one wrapper injecting (5s,20s); IB gets RequestTimeout + restart-capable in-process watchdog; WS feeds get nado's protocol-ping + a last_msg_age→force-reconnect watchdog with one WARNING on degrade. Kills: hung-fetch, silent WS-zombie latency regression, watchdog-suicide-mid-entry (calls bound in seconds, watchdog never needed for hangs).
+D. Single conformance + chaos harness in CI: runs every adapter against injected timeout/429/partial-outage/empty-response/crash-at-each-state-transition, asserts the contract (raise not {}, flat-or-protected after abort, position recoverable from any kill point). Kills: R1 itself — a fix is a fix everywhere or CI is red; a new venue is an adapter + green harness, not a fork.
+E. Independent invariant sentinel per venue (separate process): asserts every live position has a live reduce-only SL inside liq AND a DB row; every DB-open row has a position; orphan triggers fenced. Protect+alert on violation. Defense-in-depth for anything B misses.
+F. One env schema, strict unknown-key rejection, one file per venue. Kills knob-parity/dual-env drift (nado .env vs .env.xnn, pacifica unit ambiguity, inert knobs).
+
+MIGRATION (money never unprotected — exchange-resting SLs persist across every restart; each cutover is restart-shaped; shadow-compare before live):
+Phase 0 — stop-the-bleed under current architecture, 2-3 agent-days, do FIRST: (1) _ensure_flat into abort paths pac/ext/nado (3 one-line-class edits); (2) nado SDK session timeouts (port exchange_hl.py:157); (3) IB RequestTimeout + watchdog restart action; (4) insert_pending + untracked-sweep port to pac/ext/nado; (5) open_positions raise-on-unknown on all 4; (6) _sl_confirmed_live on nado; (7) IB: patch remaining 2 confirm-fail sites + halt-defer for entries; (8) FIX-5 loud fence to pac/ext/nado. This closes every CRITICAL latent hole before any refactor risk is taken.
+Phase 1 — extract byte-identical/99% modules into fleet_core (xnn_core, warmup_backfill, liquidity, strategy layer, risk, journal, orphan_sweep): 2 agent-days, provably zero behavior change (diff==empty), each venue flips imports one at a time.
+Phase 2 — adapter interface + conformance/chaos harness against the 4 existing adapters; fix violations the harness finds: 4-5 agent-days. This is where R3 dies fleet-wide.
+Phase 3 — extract exit/SL engine + entry state machine from trader.py (site of 4/7 drift bugs): 5-6 agent-days. Venue order: Extended first (strongest existing guards, 78% dup — lowest delta), Pacifica second (87% dup, vault account gains most safety), Nado third (most divergent, most latent bugs — biggest payoff, hardest port), HL LAST (canon donor, already safest, bespoke xyz leg stays venue-specific config). Each venue: 48h shadow run (parallel DRY process comparing every decision vs live bot) → cutover at flat-or-protected moment.
+Phase 4 — main-loop scaffolding + WS feed core + invariant sentinel + env schema: 3 agent-days.
+UNTOUCHED: IB architecture (not a fork sibling, 4% similarity, atomicity already server-side-correct) — IB gets only Phase 0 items + shared journal schema + harness membership. Strategies/risk numbers unchanged everywhere — this is execution plumbing only.
+Total ≈ 16-19 agent-days; after Phase 0 (day 2-3) no known naked-money path remains open during the rest.
+
+KEEP-PATCHING COST — confirmed latent bugs live TODAY (adversarially verified), each a booked future incident:
+| bug | venue | money exposure |
+|---|---|---|
+| bare market_close on SL-fail-3x abort → naked UNTRACKED position | nado, pacifica (vault), extended | unbounded, invisible to all nets |
+| crash/watchdog-kill between fill and insert_trade → untracked (naked if pre-SL) | pacifica, extended, nado | unbounded until manual audit |
+| open_positions returns {} on outage → K=3 phantom-guard closes ALL rows + cancels live SLs | hl, pacifica, extended (+nado per-coin parse variant) | whole book naked in one 3-min partial outage |
+| zero SDK timeouts, order-send included | nado | 5-8 min fleet-frozen per hang + kill-mid-entry feeds the above |
+| no RequestTimeout, watchdog alert-only | ib | indefinite hang, no trailing/exits (3 prior incidents) |
+| stale-oid naked: heal only on oid==None | nado | position naked forever after exchange-side trigger death |
+| 2 of 3 confirm-fail sites still global-halt + skipped_kill consumes entries (both active sleeves) | ib | up to a month of lost tsmom38 exposure per glitch (lost 5 signals 07-01) |
+| silent fence except-pass → sweep cancels manual/foreign SL | pacifica, extended (+nado dead FOREIGN fence) | manual position stripped of its stop |
+| WS zombie, no liveness reconnect → silent serial-REST regression | hl, pacifica | entry-latency edge silently lost, undetected |
+| fabricated fill readback (avgPx=mark, size=requested) → inert partial-fill guard, fake slip data | nado | sizing/parity corruption |
+| tp1_full_exit / us29_max_hold record reference not fill | ib | parity/accounting corruption |
+| mark=0.0 phantom-unfilled after confirmed fill → naked untracked | pacifica | unbounded, vault account |
+Run-rate under patching: incident history shows ~1 money-class event/week; every future fix costs 4-5 manual ports and empirically misses ≥1 sibling (7 documented drift cases). Patching spend exceeds the 16-19 day rebuild within ~2 months, and the naked-position tail risk (unbounded, on leveraged accounts) never closes.

@@ -1,0 +1,172 @@
+{
+ "venues": [
+  {
+   "venue": "pacifica",
+   "deployable": true,
+   "blockers": [],
+   "coverage": "1: closed — both abort paths (invariant-fail trader.py:512, FAILED-3x trader.py:539) now use _ensure_flat(known_filled_sz=filled_size); on not-flat the pending row is kept and the per-loop untracked sweep re-protects; _ensure_flat final-read failure now returns False (fail-closed, trader.py:999-1005). Verified by reading full code paths; is_long/filled_size in scope.\n2: closed — insert_pending before order send in both crypto (trader.py:394) and stop-limit (trader.py:441) branches; delete on no-fill; promote_pending on fill (idempotent WHERE status='pending', re-promote and delete-of-open/closed guards functionally tested on a temp sqlite); _reconcile_pending at startup before adopt (promote-live/delete-stale simulated OK); _untracked_protect_sweep startup + every loop (naked→±6% liq-guarded SL via _place_sl_with_retry with correct arg order, SL-covered→CRITICAL once, fenced/tracked untouched, read-failure→skip — all simulated OK). pending rows invisible to open_trades/adopt/XNN_EXPECT_EMPTY_DB confirmed.\n3: closed — open_positions() raises RuntimeError on /positions failure (stale-cache fallback removed). Every caller traced: attempt_entry:158 skip-entry, phantom-guard:1317 UNKNOWN/no-miss + final re-read defer, _ensure_flat force-close-attempt/fail-closed, both fill-confirm polls warn+retry, adopt:243 return-unchanged (startup blip retry intact), orphan_sweep:164 skip-cycle, market_close error-resp, _reconcile_pending/_untracked_protect_sweep skip. user_state() (unwrapped) has no in-repo caller. exchange_extended.py untouched — different venue's adapter, not loaded when EXCHANGE=pacifica.\n4: closed — _fenced fail-closed per fence: ImportError=skip fence, any other exception=CRITICAL+FENCED; unit-tested (broken FX_EXCLUDE iteration → True + CRITICAL; normal coin → False).\n5: closed — both confirm blocks (crypto ~1121, stop-limit ~1252) return (px, sz) with mark→entryPx→limit_px fallback once readback confirms; unfilled branch unreachable when _confirmed_sz>0.\n6: closed — last-message-age watchdog in ping loop, ref=max(last_msg, connect_ts), limit=max(60s,3×ping)=60s; one WARNING per degrade, forced ws.close() → _run backoff reconnect, INFO on recover in _on_open; _stale_limit_sec initialized after _ping_sec; compile+import chain (bot.main incl. new cross-imports, no cycles) verified with real numpy/pandas/requests in a fresh venv.\nNon-blocking notes: (a) if the order actually filled but all 4 confirm reads fail, fill is treated UNFILLED and the pending row deleted — pre-existing behavior class; now backstopped by the sweep (protective SL + CRITICAL every loop) so fail direction is safe; (b) _reconcile_pending promotes with intended entry/size (CRITICAL asks operator to verify); (c) if Pacifica WS does not answer app-level ping during a genuinely quiet 60s, watchdog causes a benign 60s reconnect churn (feed still REST-falls-back); (d) sweep's ±6% SL can coexist with a later healed strategy SL after a restart-promote (duplicate reduce-only stop, orphan sweep cleans it, CRITICALs fire for review).",
+   "fixed": "not_needed",
+   "notes": "All 6 holes closed. Verification beyond py_compile: full package import chain (bot.trader, bot.main, bot.journal, bot.orphan_sweep, bot.ws_candle_feed) imports cleanly with real deps (no circular imports from the new main.py<->trader/orphan_sweep imports); pending machinery functionally tested on a temp sqlite (insert->invisible-to-open_trades->promote->idempotent-repromote-guard->delete-guard all pass); _fenced fail-closed unit-tested (broken fence => FENCED + CRITICAL, absent venue fence => still skipped so the sweep is not silently disabled). Design decisions: (a) on a not-flat abort the pending row is KEPT (donor hl deletes it) so restart-reconcile can promote/adopt/heal — the periodic untracked sweep covers the mid-run window; (b) _fenced distinguishes ImportError (fence legitimately absent on this venue, e.g. pacifica has no bot.universe._is_fx) from evaluation exceptions — pure fail-closed-on-ImportError would fence every coin and silently disable the whole sweep; (c) untracked sweep runs every loop at ~0 REST cost (positions read is the 5s-cached one from adopt); SL-covered-but-untracked alerts once per process to avoid CRITICAL spam while the naked case re-fires every loop by design; (d) exchange_extended.py in this dir has the same {}-on-fail open_positions shape but is the extended venue's adapter — left for the extended venue pass to keep this diff venue-scoped. insert_trade stays exported from journal.py (other tooling may use it); its trader.py import is now unused but left to keep the patch minimal.",
+   "files": [
+    {
+     "file": "bot/trader.py",
+     "holes_closed": [
+      "1: both SL-fail abort paths (invariant-fail + FAILED-3x) now use _ensure_flat verified close (readback-until-flat, bounded retries, protective SL on residual); on not-flat -> CRITICAL + pending row KEPT for restart recovery + untracked sweep keeps re-protecting",
+      "1: _ensure_flat final verification read failure now returns False + ERROR (was fail-open 'confirmed flat' on a broken read)",
+      "2: insert_pending row written BEFORE market order send in both crypto and stop-limit branches; delete_pending on every no-fill/abort path; promote_pending (replaces insert_trade) on fill",
+      "5: _market_fill_crypto and _place_and_wait_fill confirm blocks never treat mark<=0 as unfilled once position readback confirmed a fill — fallback chain mark -> position entryPx -> limit_px, ERROR logged"
+     ]
+    },
+    {
+     "file": "bot/journal.py",
+     "holes_closed": [
+      "2: ported insert_pending / promote_pending (idempotent, WHERE status='pending') / delete_pending (guarded) / pending_trades from hl donor; pending rows invisible to open_trades()/adopt"
+     ]
+    },
+    {
+     "file": "bot/main.py",
+     "holes_closed": [
+      "2: _reconcile_pending(client) at startup before adopt — promotes crash-mid-entry pending rows with a live exchange position (CRITICAL) else deletes stale ones",
+      "2: _untracked_protect_sweep — startup + EVERY loop: exchange position with no DB row and no live SL gets liq-guarded ±6% protective SL + CRITICAL, re-fired until resolved; SL-covered untracked gets CRITICAL once/process; fences respected via orphan_sweep._fenced (manual/foreign never touched); read failure = UNKNOWN = skip; ~0 extra REST (reuses 5s positions cache from adopt)"
+     ]
+    },
+    {
+     "file": "bot/exchange_pacifica.py",
+     "holes_closed": [
+      "3: open_positions() now RAISES RuntimeError on /positions failure (was {} or indefinitely-stale cache). All in-repo callers already except-wrap: manage_open_position raise=UNKNOWN (no phantom miss counting, no auto-close), orphan_sweep skips cycle, adopt returns unchanged, attempt_entry skips entry, market_close returns error resp"
+     ]
+    },
+    {
+     "file": "bot/orphan_sweep.py",
+     "holes_closed": [
+      "4: _fenced fail-closed — ImportError (fence not defined on this venue) still skipped, but ANY other exception in a fence check => CRITICAL log naming the broken fence + return True (FENCED, do NOT cancel). Unit-tested standalone: broken FX_EXCLUDE iteration -> fenced=True with CRITICAL"
+     ]
+    },
+    {
+     "file": "bot/ws_candle_feed.py",
+     "holes_closed": [
+      "6: last-message-age staleness watchdog in the ping loop — reference ts = max(last_msg, connect); age > max(60s, 3×ping_sec) (3 unanswered pings = dead link) => one WARNING + force ws.close() so _run's backoff loop reconnects; INFO on recover in _on_open; get_df already REST-falls-back while degraded"
+     ]
+    }
+   ]
+  },
+  {
+   "venue": "extended",
+   "deployable": true,
+   "blockers": [],
+   "coverage": "1: closed — both SL-fail abort paths use _ensure_flat(known_filled_sz) with flat-readback as sole success criterion; ok-shaped error dicts logged at ERROR; final-read failure returns False (UNKNOWN never flat). Traced code paths + confirmed filled_size/is_long defined upstream.\n2: closed — insert_pending pre-send, delete_pending on all no-fill/abort paths, promote_pending on fill; runtime smoke test on temp DB proved pending invisible to open_trades, promote overwrites entry/size, delete/promote guarded (cannot touch open/closed rows); _reconcile_pending runs before adopt; untracked-protect sweep fenced (FX_EXCLUDE/FOREIGN_SKIP_PREFIXES), alias-deduped, DRY-skipped; DRY mode never reaches attempt_entry so no pending rows in DRY.\n3: closed — open_positions raises after a bounded (loop_interval_sec=60s, env-derived) bias-to-present cache; ALL callers audited and fail-safe: orphan_sweep skip-cycle, adopt return, reconcile defer, untracked sweep outer-try, attempt_entry skip, phantom-guard UNKNOWN-defer (no miss counted), fill-confirm wrapped, _ensure_flat handles raise, _poll_position_fill/market_open-presnapshot/assert_resting/position_liquidation wrapped; market_close's internal unwrapped read raises only into _ensure_flat which catches. Non-blocker note: user_state HL-compat shim can now raise instead of returning partial dict — unused by any in-repo money path (read-only reporting only).\n4: closed — verified by fault injection: broken FX_EXCLUDE __contains__ → _fenced returned True + CRITICAL log; ImportError-only skip is correct (from-import raises ImportError for missing symbols in py3); normal fence behavior intact (BNB fenced, SOL not).",
+   "fixed": "not_needed",
+   "notes": "All 4 holes closed. Verification: python3 -m py_compile OK on all 5 changed .py; plus a runtime smoke test of the pending lifecycle on a temp DB (insert->invisible to open_trades->promote overwrites entry/size->delete guarded, cannot touch open rows) = PASS. Could NOT run tests/test_phantom_guard.py or import bot.trader end-to-end locally (numpy + x10 SDK not installed in this sandbox) — compile + isolated tests only. Two deliberate scope notes: (a) open_positions keeps a bounded bias-to-present cache fallback (age <= loop_interval_sec) before raising — pure-raise on every 1s blip would skip whole manage ticks; beyond one loop interval it raises. (b) position_liquidation() still maps a failed open_positions read to None->'no_position'; consequence is heal-DEFER (SL left unchanged, phantom-guard handles UNKNOWN separately), not mass-close — left for a later phase, not Phase-0 bleed. insert_trade import left in trader.py though now unused on the entry path (other tooling may import it; no cosmetic deletion).",
+   "files": [
+    {
+     "file": "bot/trader.py",
+     "holes_closed": [
+      "1: both SL-fail abort paths (invariant-fail + SL-fail-3x) now use _ensure_flat verified close with known_filled_sz instead of bare client.market_close; CRITICAL on residual/UNKNOWN",
+      "1: _ensure_flat detects ok-shaped error dicts from market_close (logs ERROR; flat-readback stays the success criterion) and its final position-read failure now returns False (UNKNOWN is never 'flat')",
+      "2: insert_pending written BEFORE the market order send; delete_pending on no-fill and on both abort paths; promote_pending (replaces insert_trade) on fill — crash window fill->journal now leaves a recoverable 'pending' row"
+     ]
+    },
+    {
+     "file": "bot/journal.py",
+     "holes_closed": [
+      "2: ported donor hl insert_pending/promote_pending/delete_pending/pending_trades (status='pending' invisible to open_trades; promote/delete guarded WHERE status='pending')"
+     ]
+    },
+    {
+     "file": "bot/main.py",
+     "holes_closed": [
+      "2: _reconcile_pending(client) at startup before adopt — promotes crash-mid-entry pending rows with a live position (CRITICAL log), deletes stale ones",
+      "2: startup untracked-protect sweep (donor hl main.py) — protective ±6% liq-guarded reduce-only SL on any exchange position not tracked in-memory/DB and lacking a live SL; alias-dedup by dict identity; FX_EXCLUDE/FOREIGN_SKIP_PREFIXES fenced; DRY-skipped"
+     ]
+    },
+    {
+     "file": "bot/exchange_extended.py",
+     "holes_closed": [
+      "3: open_positions() no longer returns {} on failure — serves a bias-to-present cache only if younger than loop_interval_sec (60s default, derived not arbitrary), else RAISES so callers treat UNKNOWN (all in-venue callers audited: attempt_entry skips, manage defers, _ensure_flat/_market_fill_crypto/_poll_position_fill/orphan_sweep catch)"
+     ]
+    },
+    {
+     "file": "bot/orphan_sweep.py",
+     "holes_closed": [
+      "4: _fenced() except-pass split: ImportError (fence not defined on venue) = skip that fence; any evaluation failure = fail CLOSED (return fenced=True) + CRITICAL log — a broken fence can never let the sweep cancel a possibly-manual trigger"
+     ]
+    }
+   ]
+  },
+  {
+   "venue": "nado",
+   "deployable": true,
+   "blockers": [],
+   "coverage": "1: closed — SL-fail abort now calls pre-existing _ensure_flat (flat-readback, 3x close retry, protective SL on residual, CRITICAL on fail); is_long/filled_size in scope at call site.\n2: closed — insert_pending truly pre-send; delete_pending on no-fill AND SL-fail abort; promote_pending with actual fill (guarded WHERE status='pending', runtime smoke-verified incl. delete-guard + idempotence); startup _reconcile_pending runs before _restore_positions_from_db; _protect_untracked_positions fenced/DRY-gated/indeterminate-safe; pending rows invisible to open_trades/XNN_EXPECT_EMPTY_DB/post_trade_audit (opened_at NULL).\n3: closed — per-item parse failure raises (whole read aborts, CRITICAL), top-level failure raises only when no stale cache; every caller in bot/ and both ops scripts catches or treats raise as indeterminate-skip; symbol keyspace consistent (single _pid_to_symbol source) so no caller-side key mismatch.\n4: closed — per-tick _sl_confirmed_live is oid-exact against live trigger listing (digest format matches _confirm_trigger_live's stored oid — verified in SDK wheel); heal uses live size + liq-guard + _confirm_sl_live_poll readback; emergency-close passes the unconfirmed oid for cancel; raise=INDETERMINATE=assume-live (anti-churn); runs after phantom-guard and _pending_entry/DRY gates; trail paths update stored oid so no false-heal loop.\n5: closed — _wrap_open_resp reads real VWAP/cum-size from subaccount-filtered matches feed with strict pre-send submission_idx watermark, 5 bounded retries; KILLED FOK → cum=0 → 'unconfirmed' (no fabricated numbers) → trader's existing step-5 position-readback resolves to live size or UNFILLED (parse path verified: no unconditional 'filled' access); partial <95% only accepted on last attempt then min_fill_ratio guard fires emergency close. Residual (non-blocker): readback adds indexer calls on the entry path whose session timeout is fenced to the parallel task.\n6: closed — all four fence sources ImportError-only skip, any other failure = FENCED + CRITICAL; FX_EXCLUDE exists in nado config (ImportError impossible for it), FOREIGN_SKIP_PREFIXES genuinely absent → clean skip; logging import added; compile OK.\n7: closed — verified against actual SDK wheel: EngineClient/TriggerClient are Query+Execute merged classes, ExecuteClient.__init__ sets the final self.session used by execute .post(); wrapper patches session.request (requests' post→self.request path), idempotence flag, env NADO_SDK_READ_TIMEOUT, reinstalled after _ensure_trigger_client SDK rebuild; engine_client._querier and indexer_client hold separate Session objects — untouched per fence. Note: a send read-timeout is surfaced as no-fill without position readback (engine-accepted-but-response-lost order stays untracked until next restart, where the new startup protect sweep covers it) — strictly better than pristine's indefinite hang with zero recovery.",
+   "fixed": "not_needed",
+   "notes": "All 7 holes closed. Verification: python3 -m py_compile passed on all 5 changed .py; pending-row SQL smoke-tested against the real schema (insert->promote(sl_initial)->idempotence->guarded delete) in :memory: sqlite; AST check confirms 1×insert_pending/2×delete_pending/1×promote_pending path coverage in trader. Design notes: (a) hole 5 uses a pre-send matches watermark — when the matches feed is empty/unreadable pre-send, attribution is ambiguous and the wrapper returns 'unconfirmed' (trader's existing position-readback confirm path then supplies real size, mark px, or UNFILLED) — fills are never mis-attributed to an older trade; (b) hole 3 top-level failure still serves the existing stale-cache phantom-close guard when a cache exists (unchanged designed behavior), raises only when there is no cache; (c) hole 7 wraps ONLY sdk.context.engine_client.session (execute) and trigger_client.session — indexer_client and engine_client._querier sessions untouched per the parallel-task fence; guard re-installed after _ensure_trigger_client's SDK rebuild; timeout defaults mirror the hl donor (5s/20s, env-overridable); (d) per-tick SL-liveness costs one list_open_sl_orders call per open position per 60s tick (same as pacifica donor). Residual risk (pre-existing, matches hl donor idiom, NOT changed): _ensure_flat's final residual read treats a read exception as flat — same as donor. FOREIGN_EXCLUDE_COINS is mentioned in the orphan_sweep docstring but has no Nado config symbol (venue-absent, covered by FX_EXCLUDE on Extended per docstring).",
+   "files": [
+    {
+     "file": "bot/trader.py",
+     "holes_closed": [
+      "1: SL-fail abort now uses _ensure_flat verified close (flat-readback, retries, protective SL on residual, CRITICAL on failure) instead of bare market_close",
+      "2: insert_pending pre-send row; delete_pending on no-fill and on SL-fail abort; promote_pending with actual fill (replaces post-fill insert_trade)",
+      "4: per-tick _sl_confirmed_live oid-exact readback (TP trigger cannot mask a dead SL) + heal with live-size + liq-guard + _confirm_sl_live_poll readback; emergency-close on confirm failure; raise-on-readback = INDETERMINATE => assume live (anti-churn)"
+     ]
+    },
+    {
+     "file": "bot/exchange_nado.py",
+     "holes_closed": [
+      "3: open_positions per-item parse failure now RAISES (CRITICAL log, whole read aborts => UNKNOWN tick); top-level fetch failure with no cache RAISES instead of returning {}",
+      "5: _wrap_open_resp reads back REAL fill (pre-send submission_idx watermark + per-product matches VWAP, 5 bounded retries); unavailable/ambiguous => 'unconfirmed' status (no fabricated numbers) which trader's existing phantom-fill guard resolves via position readback (journal px provisional at mark, ERROR-logged); a KILLED FOK is no longer reported as a full fill",
+      "7: _install_session_timeout (connect 5s / read 20s, env NADO_SDK_READ_TIMEOUT) installed on engine_client execute session + trigger_client session at init AND after the trigger-client SDK rebuild; indexer/_querier sessions deliberately untouched"
+     ]
+    },
+    {
+     "file": "bot/journal.py",
+     "holes_closed": [
+      "2: insert_pending/promote_pending/delete_pending/pending_trades ported (nado schema — no atr14/entry_bar_ts); promote guarded WHERE status='pending', accepts liq-guarded sl_initial; pending invisible to open_trades/XNN_EXPECT_EMPTY_DB"
+     ]
+    },
+    {
+     "file": "bot/main.py",
+     "holes_closed": [
+      "2: startup _reconcile_pending (promote crash-mid-entry pending rows with live position => restore/adopt heals SL; delete stale) called before _restore_positions_from_db; _protect_untracked_positions startup sweep (untracked+unprotected+unfenced exchange position gets ±6% liq-guarded protective SL; fence reuses orphan_sweep._fenced; SL-readback failure = indeterminate => not touched; DRY skipped)"
+     ]
+    },
+    {
+     "file": "bot/orphan_sweep.py",
+     "holes_closed": [
+      "6: _fenced fail-closed — only ImportError (fence source genuinely absent on venue, e.g. FOREIGN_SKIP_PREFIXES on Nado) is skipped; any other fence-evaluation failure => coin treated as FENCED (never cancelled) + CRITICAL log, for all four fence sources"
+     ]
+    }
+   ]
+  },
+  {
+   "venue": "hl",
+   "deployable": true,
+   "blockers": [],
+   "coverage": "1 (open_positions {} / stale-cache on failure): CLOSED — main + HIP-3 dex paths both raise after bounded retries (exchange_hl.py:832-861); no stale-cache/{} degrade remains; all 17 live call sites verified except-Exception-wrapped with UNKNOWN-safe fail direction (skip entry, fail-closed MM gate, defer phantom decision, abort sweeps, keep pending rows); phantom-guard K=3 path explicitly no-counts UNKNOWN ticks (trader.py:1457-1470).\n2 (zombie WS run_forever ping_interval=0 + swallowed ping exceptions): CLOSED — last-message-age watchdog in _ping_loop with derived 60s (3x20s ping, HL server pongs app pings and drops silent clients at 60s), _on_open baseline seed, ping-send exception -> WARNING + _force_reconnect, socket close unblocks run_forever recv so _run reconnects ~1s; WARNING on degrade / INFO on recover / degraded flag in stats(); pongs refresh last_msg_ts (stamped before channel filter).",
+   "fixed": "not_needed",
+   "notes": "Both confirmed holes closed; nothing left open. Caller audit before flipping the fail direction: every open_positions() call site in live code (trader.py 173/995/1004/1013/1055/1156/1307/1460/1487; main.py 201/262/841/1212/1243; orphan_sweep.py 234; resting_orders.py 411; scripts/naked_sl_sentinel.py 55) is already try/except-wrapped with UNKNOWN-safe fallbacks (skip entry, defer phantom decision, abort sweep, keep pending rows), so raising cannot introduce a new close path. Deliberately KEPT: run_forever(ping_interval=0) (HL uses app-level {\"method\":\"ping\"} idiom; watchdog covers dead-socket detection), the 20s positions cache (unchanged semantics on success), and exchange_pacifica.py/exchange_extended.py copies in this repo (their own venues own those patches). Startup-blip guard in _adopt_db_open_positions still works: transient failures now surface as exceptions caught at 271 (continue-retry) instead of a fake empty dict.",
+   "files": [
+    {
+     "file": "bot/exchange_hl.py",
+     "holes_closed": [
+      "open_positions() now RAISES on fetch failure after retries instead of returning stale cache or {} (phantom-guard K=3 mass-close + SL-cancel class killed at the source)",
+      "HIP-3/xyz dex-scoped clearinghouseState failure now RAISES (RuntimeError from underlying exc) instead of silently returning a dict missing that dex's positions or stale-cache entries; 429s still re-enter the outer retry budget before propagating",
+      "failure logs upgraded WARNING->ERROR on this money path"
+     ]
+    },
+    {
+     "file": "bot/ws_candle_feed.py",
+     "holes_closed": [
+      "zombie-WS: last-message-age staleness watchdog in _ping_loop (threshold = 3 x ping_sec, derived: server pongs app-level pings so any live socket refreshes last_msg_ts every ping_sec; 3 missed pongs = dead) -> _force_reconnect() closes socket so _run() reconnects with ~1s backoff",
+      "WARNING on degrade (feed stale -> scans fall back to throttled REST), INFO on recover (first message after stale period)",
+      "ping-send exceptions no longer swallowed (except: pass -> WARNING + force reconnect)",
+      "_on_open seeds last_msg_ts baseline so a connection that never delivers a single message still trips the watchdog; stats() exposes degraded flag"
+     ]
+    }
+   ]
+  }
+ ],
+ "ibPkg": {
+  "path": "/private/tmp/claude-501/-Users-ak-Desktop-HL/9be32b77-a660-4259-ad5b-58055d718915/scratchpad/ib_phase0_relay.md",
+  "summary": "Ready-to-paste Phase 0 package for server-Claude, 5 patches with exact replacement blocks + snapshot line refs + per-item verify commands. (1) ib.RequestTimeout=30s (env IB_REQUEST_TIMEOUT_SEC) in IBClient.__init__ + full enumeration of 14 blocking call-site groups with their failure paths + main.py handler change so IB timeouts never consume signals as 'error'. (2) Restart-not-alert: in-process hang watchdog thread (beat per cycle, os._exit(70) after IB_HANG_RESTART_SEC=900 → Restart=on-failure; explicit warning NOT to switch to Restart=always, preserves the Error-326 exit-0 design) + scripts/watchdog.py systemctl-restart on active-but-IB-link-stale (restart only that branch; inactive stays alert-only) + sudoers drop-in. (3) Found the 2 remaining confirm-fail sites lacking the 07-02 scoped-skip: place_bracket_no_tp (~L417-440) and place_market_with_stop (~L1060-1093); ported the Filled→flat+halt / Cancelled-Rejected→per-symbol-skip / ambiguous→halt triage verbatim (callers already mark 'error' per-symbol). (4) skipped_kill→DEFER at trader.py 157/885/1101 via existing pending_signals store (save + don't mark processed; TTL bounds staleness; main.py X1 cleanup already keeps unprocessed pending files). (5) Fill-truth: _handle_position_closed gains px_is_fill flag forcing IB fill read-back for tp1_full_exit and us29_max_hold reference-px sites, direction now from state.side (fixes silently-broken read-back on tsmom38 shorts), and user_fills now maps contract.symbol through canon_coin (fixes read-back+reconciler ghost-close never matching the 30 canonical fut contracts)."
+ }
+}

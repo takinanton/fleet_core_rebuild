@@ -1,0 +1,21 @@
+# Core
+hyperliquid-python-sdk>=0.9.0
+eth-account>=0.8.0
+
+# Data
+pandas>=2.0.0
+numpy>=1.24.0
+polars>=0.20.0
+
+# HTTP
+requests>=2.31.0
+
+# Config
+python-dotenv>=1.0.0
+pyyaml>=6.0.0
+
+# DB
+# sqlite3 is stdlib — no package needed
+
+# Utilities
+python-dateutil>=2.8.0
